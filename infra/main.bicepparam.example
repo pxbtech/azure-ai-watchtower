@@ -1,0 +1,21 @@
+// Example parameter file. Copy to main.bicepparam and fill in your values.
+// Deploy with:
+//   az deployment group create --resource-group <rg> --template-file main.bicep --parameters main.bicepparam
+
+using './main.bicep'
+
+// Names of existing resources in the target resource group:
+param foundryAccountName = '<your-foundry-account-name>'
+param apimServiceName    = '<your-apim-service-name>'
+param keyVaultName       = '<your-key-vault-name>'
+
+// App Service Plan SKU. Recommended: B1 for dev, P0V3+ for prod.
+param appServicePlanSku = 'B1'
+
+// PostgreSQL SKU. Standard_B1ms Burstable is the cheapest tier that works reliably.
+param pgSku = 'Standard_B1ms'
+param pgTier = 'Burstable'
+
+// Optional: bring your own Postgres admin password. If omitted, one is derived
+// deterministically from the RG/subscription IDs (fine for dev, rotate for prod).
+// param pgAdminPassword = '<your-strong-password>'

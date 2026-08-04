@@ -1,0 +1,59 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+*.sqlite
+*.db
+
+# ---- Node / frontend ----
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# ---- Bundled static assets (built fresh by CI/build step) ----
+backend/src/watchtower/static/
+
+# ---- Environment / secrets ----
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+*.pfx
+.azure/
+azuredeploy.parameters.json
+main.bicepparam
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- Build / packaging artifacts ----
+*.zip
+*.tar.gz
+watchtower.zip
+wt-logs/
+LogFiles/
+
+# ---- OS ----
+$RECYCLE.BIN/
+System Volume Information/
