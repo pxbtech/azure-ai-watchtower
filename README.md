@@ -2,9 +2,50 @@
 
 **A governance, metering, and compliance control plane for Azure AI Foundry.**
 
-AI Watchtower is a **layer on top of your existing Azure AI stack**. It does not replace Foundry, APIM, or Key Vault - it orchestrates them. If you already have those resources running and need standardised intake, budget enforcement, cost visibility, and compliance grading across every AI endpoint in your organisation, this is that missing control plane.
-
 Not a mock. Not a demo. It talks to the real Azure control plane.
+
+---
+
+## Who this is for
+
+AI Watchtower is built for teams who **already operate an Azure AI Hub with a gateway in front of it** - meaning Azure AI Foundry deployments published through Azure API Management, with keys stored in Key Vault and traffic logged to Log Analytics. If that describes your environment and you need standardised intake, per-endpoint budget enforcement, live cost tracking, and OWASP LLM compliance grading across everything the hub serves, this is the missing control plane.
+
+**Not for:**
+- Greenfield installs. Watchtower does not create Foundry / APIM / Key Vault for you.
+- Single-model demos. It is overkill for one endpoint.
+- Non-Azure AI stacks (OpenAI direct, Bedrock, self-hosted). Different control planes, different assumptions.
+
+If any of those describe your setup, this repo is not the right fit.
+
+---
+
+## What this platform is for
+
+Standardising how AI endpoints get provisioned, governed, priced, and audited on an existing Foundry + APIM hub. If your team is manually creating Foundry deployments, hand-editing APIM policies, and tracking ownership in a spreadsheet, Watchtower replaces all of that with one self-serve form and a background worker that enforces the rules programmatically.
+
+In one sentence: **it is the intake + governance layer that a Foundry-behind-APIM hub needs but Azure does not ship.**
+
+---
+
+## What "a project" means in Watchtower, and the added value
+
+A **project** in Watchtower is a Foundry project (logical grouping under a Foundry account) that hosts one or more **deployments**. Each deployment is one governed AI endpoint published through APIM. When a user submits the intake form, they either associate the new endpoint with an existing project or create a new one inline.
+
+Projects give you organisational grouping: burn rate summed across all deployments in a project, per-project compliance rollups, and delete-project safety (refuses if any deployment still references it).
+
+**The value versus doing this by hand today:**
+
+| Without Watchtower | With Watchtower |
+|---|---|
+| Ticket-driven manual deployments (someone files a request, an engineer clicks through Foundry, another engineer configures APIM, a third stores the key in KV) | One-shot self-serve form: Foundry project + deployment + APIM API + subscription + KV secret, all in one submission, in about 30 seconds |
+| Manual APIM policies per API, each one a snowflake | Standardised policy template applied identically to every endpoint: token limit, RPM, MI auth, metadata injection |
+| Ownership tracked in a wiki or spreadsheet | Ownership metadata (app / owner / team / BU / env / cost center) injected as HTTP headers on every downstream call to Foundry |
+| Reactive cost review at month-end | Real-time per-endpoint cost and burn %, auto-suspend at your configured threshold |
+| Periodic manual OWASP audits | Continuous OWASP LLM Top 10 grading per model with critical-fail flags |
+| Config changes to APIM policies or Foundry go untracked | Config drift detection from Azure Activity Log, surfaced per endpoint |
+| Delete = "hope you cleaned up everything" | Delete cascade: APIM API + subscription + KV secret + soft-delete purge + audit log entry, single typed-confirmation |
+
+Every endpoint that goes through Watchtower ends up in the same governance state - fully tagged, rate-limited, budget-capped, MI-authed to Foundry, compliance-graded - with zero manual APIM policy edits.
 
 ---
 
@@ -108,33 +149,136 @@ More detail in [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
-## Quick start
+## Deployment walkthrough
+
+This is the abbreviated version. Every command has a verification step and full explanation in [`docs/deployment.md`](docs/deployment.md). Follow these in order.
+
+### What you need to define before starting
+
+Have these values ready. They map directly to Bicep parameters and `az` commands throughout:
+
+| Placeholder | What it is | How to find it |
+|---|---|---|
+| `<sub>` | Azure subscription ID (GUID) | `az account show --query id -o tsv` |
+| `<rg>` | Resource group containing all four Azure resources | Your existing hub RG |
+| `<foundry>` | Foundry account name (Cognitive Services, `kind=AIServices`) | `az cognitiveservices account list -g <rg> --query "[?kind=='AIServices'].name" -o tsv` |
+| `<apim>` | API Management service name | `az apim list -g <rg> --query "[].name" -o tsv` |
+| `<kv>` | Key Vault name (must be RBAC mode) | `az keyvault list -g <rg> --query "[?properties.enableRbacAuthorization].name" -o tsv` |
+| `<workspace>` | Log Analytics workspace name | `az monitor log-analytics workspace list -g <rg> --query "[].name" -o tsv` |
+
+Also decide:
+
+- **App Service Plan SKU** for Watchtower itself: `B1` for dev (~$13/mo, recommended), `P0V3` for prod (~$54/mo). `F1` Free exists but hits CPU quota under Azure SDK load - avoid.
+- **Postgres SKU**: `Standard_B1ms` Burstable (~$12/mo, recommended for dev/small teams), `Standard_D2s_v3` General Purpose for larger deployments.
+- **Azure region** for Watchtower's new resources: defaults to the RG's region. Watchtower itself is region-agnostic; Foundry / APIM / KV can be anywhere.
+
+### Step 0: clone and log in
 
 ```bash
-git clone https://github.com/<your-org>/ai-watchtower.git
-cd ai-watchtower
-
-# 1. Deploy infrastructure (creates MI, RBAC, App Service, Postgres)
-cd infra
-pwsh ./deploy.ps1 `
-  -SubscriptionId <sub-id> `
-  -ResourceGroup <rg> `
-  -FoundryAccountName <foundry-account-name> `
-  -ApimServiceName <apim-service-name> `
-  -KeyVaultName <key-vault-name>
-
-# 2. Build the frontend and stage it inside the backend package
-cd ../frontend && npm install && npm run build
-Copy-Item -Recurse ./dist/* ../backend/src/watchtower/static/
-
-# 3. Package + deploy the app
-cd ../backend
-Compress-Archive -Path * -DestinationPath ../watchtower.zip -Force
-az webapp deploy --resource-group <rg> --name <web-app-name> `
-  --src-path ../watchtower.zip --type zip
+git clone https://github.com/pxbtech/azure-ai-watchtower.git
+cd azure-ai-watchtower
+az login
+az account set --subscription <sub>
 ```
 
-Full walkthrough (Log Analytics wiring, APIM diagnostics, RAI policy, first intake) in [`docs/deployment.md`](docs/deployment.md).
+### Step 1: manual configuration on existing resources (5 minutes, one-time)
+
+Five one-liners. Skip any and the corresponding feature silently fails. Full explanation and verification for each is in [`docs/deployment.md`](docs/deployment.md#part-a-manual-configuration-on-existing-resources).
+
+```bash
+# 1a. Wire APIM diagnostics into Log Analytics
+az monitor diagnostic-settings create --name watchtower-diag \
+  --resource $(az apim show -g <rg> -n <apim> --query id -o tsv) \
+  --workspace $(az monitor log-analytics workspace show -g <rg> -n <workspace> --query id -o tsv) \
+  --logs '[{"categoryGroup":"allLogs","enabled":true}]' \
+  --metrics '[{"category":"AllMetrics","enabled":true}]'
+
+# 1b. Enable body logging (see docs/deployment.md#2 for the az rest command;
+#     needs an existing APIM logger of type applicationInsights)
+
+# 1c. Seed the APIM named value that the suspend gate policy references
+az apim nv create -g <rg> --service-name <apim> \
+  --named-value-id watchtower-suspended-deployments \
+  --display-name watchtower-suspended-deployments \
+  --value __none__ --secret false
+
+# 1d. Enable Foundry project management
+az rest --method PATCH \
+  --uri "https://management.azure.com/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<foundry>?api-version=2025-04-01-preview" \
+  --body '{"properties": {"allowProjectManagement": true}}'
+
+# 1e. Verify APIM is v2 (needed for token-limit policy)
+az apim show -g <rg> -n <apim> --query "sku.name" -o tsv
+# expected: Basicv2, Standardv2, or Premiumv2
+```
+
+### Step 2: deploy AI Watchtower's own infrastructure
+
+Bicep provisions the user-assigned managed identity, cross-scope RBAC (7 role assignments), App Service Plan + Web App, and PostgreSQL Flexible Server.
+
+```powershell
+cd infra
+pwsh ./deploy.ps1 `
+  -SubscriptionId '<sub>' `
+  -ResourceGroup '<rg>' `
+  -FoundryAccountName '<foundry>' `
+  -ApimServiceName '<apim>' `
+  -KeyVaultName '<kv>' `
+  -AppServicePlanSku 'B1' `
+  -PostgresSku 'Standard_B1ms'
+```
+
+Takes ~10 minutes. On success, prints `webAppUrl`, `managedIdentityClientId`, and `pgServerFqdn`.
+
+### Step 3: put Entra ID auth in front of the app (STRONGLY recommended)
+
+Watchtower has no built-in authentication. Before the URL is reachable to anyone outside your control, add Easy Auth. Full command in [`docs/deployment.md`](docs/deployment.md#7-optional-but-strongly-recommended-put-entra-id-auth-in-front) - ~2 minutes.
+
+Alternative interim: IP allow-list (`az webapp config access-restriction add`) if you can't do Entra right now.
+
+### Step 4: build and deploy the app code
+
+```powershell
+# Build frontend, stage into backend package
+cd ..\frontend
+npm install
+npm run build
+New-Item -ItemType Directory -Force -Path ..\backend\src\watchtower\static | Out-Null
+Copy-Item -Recurse -Force .\dist\* ..\backend\src\watchtower\static\
+
+# Package and deploy backend
+cd ..\backend
+Compress-Archive -Path * -DestinationPath ..\watchtower.zip -Force
+az webapp deploy `
+  --resource-group <rg> `
+  --name <web-app-name-from-step-2-output> `
+  --src-path ..\watchtower.zip --type zip
+```
+
+Takes ~5-10 minutes. A 504 timeout from `az webapp deploy` is normal on B1 SKUs - Oryx keeps building server-side. Wait then hit `https://<web-app-name>.azurewebsites.net/api/health`.
+
+### Step 5: first intake (smoke test)
+
+Open `https://<web-app-name>.azurewebsites.net/`, click **New project**, fill the form (project name, model, SKU, ownership fields, TPM/RPM/budget/threshold). Within 30 seconds you should see the new endpoint appear in the Projects table with a Grade A compliance score.
+
+Test the endpoint:
+
+```bash
+KEY=$(az keyvault secret show --vault-name <kv> --name <secret-name-from-ui> --query value -o tsv)
+curl -H "api-key: $KEY" -H "Content-Type: application/json" \
+     -d '{"messages":[{"role":"user","content":"hello"}]}' \
+     "https://<apim-gateway>/openai/deployments/<deployment>/chat/completions?api-version=2024-08-01-preview"
+```
+
+Within 60-90 seconds the Projects table should show non-zero **Consumed** cost and burn %.
+
+### Step 6: verify enforcement is actually firing
+
+- Send a few more requests. Cost climbs.
+- Lower the deployment's budget threshold to 1% via the drawer. Send more requests. Endpoint state flips to **Suspended** within ~60s. Requests start returning HTTP 429.
+- `GET /api/audit-log?deployment=<name>` shows an `auto_suspend` event.
+
+If any of that doesn't happen, see the [troubleshooting section](docs/deployment.md#troubleshooting) - it maps every likely error to the step that was skipped.
 
 ---
 
