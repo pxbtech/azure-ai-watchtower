@@ -34,6 +34,34 @@ If you do NOT have Foundry / APIM / Key Vault / Log Analytics already provisione
 
 ---
 
+## Manual configuration required on those resources
+
+The Bicep provisions AI Watchtower's own resources (managed identity, App Service, Postgres) and grants RBAC. It does **not** touch the four prerequisite resources beyond RBAC. You must configure them yourself, once, before AI Watchtower will work end-to-end. Skipping any of these means the app will deploy but the corresponding feature will silently show empty states or fail on first use.
+
+Each step below is a link to the exact command in [`docs/deployment.md`](docs/deployment.md).
+
+| # | Manual step | Consequence if skipped |
+|---|---|---|
+| 1 | [Wire APIM diagnostics into Log Analytics](docs/deployment.md#1-wire-apim-diagnostics-into-log-analytics) (one `az monitor diagnostic-settings create` command) | Cost / burn % / monitoring pages show empty. Budget enforcement never fires. |
+| 2 | [Enable body logging on APIM diagnostics](docs/deployment.md#2-enable-body-logging-on-apim-diagnostics) (one `az rest` PUT call) | `azure-openai-emit-token-metric` cannot see token counts. Cost stays at zero. |
+| 3 | [Seed the `watchtower-suspended-deployments` APIM named value](docs/deployment.md#3-seed-the-apim-named-value) (one `az apim nv create` command) | **First intake fails** with "Named Value cannot be empty" - the suspend gate policy references this NV. |
+| 4 | [Enable Foundry `allowProjectManagement`](docs/deployment.md#4-enable-foundry-project-management) (one `az rest` PATCH) | AI Watchtower tries to auto-enable this on first intake; if the account is missing Cognitive Services Contributor at that moment, first intake fails at the Foundry stage. |
+| 5 | [Verify APIM SKU is v2](docs/deployment.md#5-verify-apim-sku) | `azure-openai-token-limit` policy silently no-ops on v1 tiers. Every intake will succeed but TPM enforcement will be inactive. |
+
+Do these 5 things **before** running `deploy.ps1`. All five are one-liners and take maybe 5 minutes total.
+
+---
+
+## Security warning: no built-in authentication
+
+**AI Watchtower ships with no authentication in front of the app itself.** If you deploy it and expose the URL publicly, anyone who finds it can create Foundry deployments in your subscription, spending real money against your budget.
+
+Before making the app URL reachable from the internet, put App Service Authentication (Easy Auth) in front of it with Entra ID as the identity provider. See [`docs/deployment.md#7-optional-but-strongly-recommended-put-entra-id-auth-in-front`](docs/deployment.md#7-optional-but-strongly-recommended-put-entra-id-auth-in-front) for the exact commands (~2 minutes, no code changes needed).
+
+Alternative interim mitigation: leave the App Service on the default `*.azurewebsites.net` hostname and restrict access with **Access Restrictions** (allow-list of your office IPs) until Easy Auth is in place.
+
+---
+
 ## What it adds on top
 
 Once installed, AI Watchtower gives you the controls that Foundry alone does not:
